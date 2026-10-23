@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Cpath d='M6 22l10-12 10 12z' fill='%234dabf7'/%3E%3Crect x='6' y='24' width='20' height='3' rx='1.5' fill='%2320c997'/%3E%3C/svg%3E"
+    />
+    <title>Mall Map — runtime checks</title>
+    <style>
+      body { background:#0b0e14; color:#e9ecef; font-family: monospace; padding:16px; }
+      .pass { color:#51cf66; } .fail { color:#ff6b6b; } h1 { font-size:15px; }
+    </style>
+  </head>
+  <body>
+    <h1>Mall Map — runtime checks</h1>
+    <pre id="results">running…</pre>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { generateShopData, SHOP_COUNT, SHOP_HEIGHT } from '/src/data.js';
+      import { layoutShops, placementsById, verifyLayout } from '/src/layout.js';
+      import { createRenderer, createScene, createLighting, createFloor, buildMall } from '/src/scene.js';
+      import { CameraManager, FOV_2D } from '/src/camera.js';
+      import { LabelManager } from '/src/labels.js';
+      import { InteractionManager } from '/src/interaction.js';
+
+      const out = [];
+      let failures = 0;
+      const assert = (cond, msg, detail = '') => {
+        if (!cond) failures++;
+        out.push(`${cond ? 'PASS' : 'FAIL'} ${msg}${detail ? ' :: ' + detail : ''}`);
+      };
+
+      try {
+        // ---------------------------------------------------------- data
+        const shops = generateShopData(SHOP_COUNT);
+        const layout = layoutShops(shops, { padding: 1, aisle: 2 });
+        const map = placementsById(layout.placements);
+        assert(shops.length === 100, '100 shops generated');
+        assert(verifyLayout(layout.placements).length === 0, 'layout has no overlaps');
+        assert(map.size === 100, 'placement map complete');
+
+        // --------------------------------------------------------- scene
+        const container = document.createElement('div');
+        container.style.cssText = 'position:fixed;inset:0;';
+        document.body.appendChild(container);
+
+        const renderer = createRenderer(container);
+        const gl = renderer.getContext();
+        assert(!!gl, 'WebGL context created');
+        assert(renderer.domElement instanceof HTMLCanvasElement, 'canvas element created');
+
+        const scene = createScene();
+        createLighting(scene, layout.bounds);
+        createFloor(scene, layout.bounds);
+        const { meshes } = buildMall(scene, shops, map);
+        assert(meshes.length === 100, '100 shop meshes created');
+        assert(meshes.every((m) => m.position.y === SHOP_HEIGHT / 2), 'meshes rest on the ground plane');
+        assert(
+          meshes.every((m, i) => i === 0 || m.userData.shopId !== meshes[i - 1].userData.shopId),
+          'mesh userData carries unique ids'
+        );
+
+        // -------------------------------------------------------- camera
+        const aspect = container.clientWidth / container.clientHeight;
+        const cameraManager = new CameraManager({
+          domElement: renderer.domElement,
+          bounds: layout.bounds,
+          aspect
+        });
+        assert(cameraManager.activeCamera.isPerspectiveCamera, 'starts in 3D (perspective) mode');
+
+        // The 3D pose must frame the whole mall.
+        const p3d = cameraManager.perspectiveCamera.position;
+        assert(p3d.length() > layout.bounds.radius, '3D camera is outside the mall footprint');
+
+        // Switch to 2D and fast-forward the transition.
+        cameraManager.setMode('2d');
+        assert(cameraManager.isTransitioning, 'transition started');
+        cameraManager.update(performance.now() + 5000);
+        assert(!cameraManager.isTransitioning, 'transition completed');
+        assert(cameraManager.activeCamera.isOrthographicCamera, 'active camera is now orthographic');
+        assert(cameraManager.blend === 1, 'blend reached the 2D state');
+
+        // The orthographic frustum must match the perspective 2D framing exactly.
+        const visibleHeight = cameraManager.orthographicCamera.top - cameraManager.orthographicCamera.bottom;
+        const expectedHeight = 2 * cameraManager.planDistance * Math.tan((FOV_2D * Math.PI) / 180 / 2);
+        assert(
+          Math.abs(visibleHeight - expectedHeight) < 1e-6,
+          'ortho frustum matches the perspective 2D framing',
+          `${visibleHeight.toFixed(6)} vs ${expectedHeight.toFixed(6)}`
+        );
+
+        // The orthographic camera must look straight down the -Y axis.
+        const dir = new THREE.Vector3();
+        cameraManager.orthographicCamera.getWorldDirection(dir);
+        assert(Math.abs(dir.y + 1) < 1e-6, 'orthographic camera looks straight down', dir.toArray().map(n => n.toFixed(4)).join(','));
+
+        // And back to 3D.
+        cameraManager.setMode('3d');
+        cameraManager.update(performance.now() + 5000);
+        assert(cameraManager.activeCamera.isPerspectiveCamera, 'switched back to perspective');
+
+        // ------------------------------------------------------- labels
+        const labels = new LabelManager({
+          container,
+          shops,
+          placements: map,
+          height: SHOP_HEIGHT,
+          onHover: () => {},
+          onSelect: () => {}
+        });
+        labels.attachTo(scene);
+        labels.setSize(container.clientWidth, container.clientHeight);
+        labels.setBlend(0);
+        labels.update(cameraManager.activeCamera, container.clientHeight);
+        renderer.render(scene, cameraManager.activeCamera);
+        labels.render(scene, cameraManager.activeCamera);
+        const labelEls = document.querySelectorAll('.shop-label');
+        assert(labelEls.length === 100, '100 label elements created', `(${labelEls.length})`);
+        assert(
+          [...labelEls].every((el) => el.textContent.trim().length > 0),
+          'every label carries text'
+        );
+        assert(
+          [...labelEls].every((el) => el.style.transform.includes('translate')),
+          'labels are positioned by CSS2DRenderer'
+        );
+        const scaled = [...labelEls].every((el) => {
+          const v = getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale');
+          return v !== '' && Number(v) >= 0.5;
+        });
+        assert(scaled, 'responsive scale applied to every label');
+
+        // -------------------------------------------------- interaction
+        const logged = [];
+        const originalLog = console.log;
+        console.log = (...args) => { logged.push(args); originalLog.apply(console, args); };
+
+        const interaction = new InteractionManager({
+          domElement: renderer.domElement,
+          cameraManager,
+          meshes,
+          scene,
+          onHover: () => {},
+          onSelect: () => {}
+        });
+
+        // Project the centre of a shop into NDC and aim the pointer at it.
+        const target = meshes[42];
+        const worldPos = new THREE.Vector3();
+        target.getWorldPosition(worldPos);
+        const projected = worldPos.clone().project(cameraManager.activeCamera);
+        interaction.pointer.set(projected.x, projected.y);
+        interaction.pointerInside = true;
+        interaction.needsRaycast = true;
+        interaction.update();
+        assert(
+          interaction.hoveredId === target.userData.shopId,
+          'raycast hover resolves the shop under the cursor',
+          `${interaction.hoveredId} vs ${target.userData.shopId}`
+        );
+        assert(
+          target.material.emissiveIntensity > 0,
+          'hovered mesh is highlighted',
+          `emissiveIntensity=${target.material.emissiveIntensity}`
+        );
+
+        // Click -> selection.
+        interaction.select(target.userData.shopId);
+        assert(interaction.selectedId === target.userData.shopId, 'click selects the shop');
+        assert(interaction.outline.visible, 'selection outline is visible');
+        assert(
+          logged.length >= 2 &&
+            JSON.stringify(logged[1][0]).includes(target.userData.shopId),
+          'selection is logged to the console with id / name / position',
+          JSON.stringify(logged[1]?.[0] ?? {})
+        );
+
+        // Selection must survive a mode switch and a hover change.
+        interaction.pointer.set(2, 2);
+        interaction.needsRaycast = true;
+        interaction.update();
+        assert(interaction.selectedId === target.userData.shopId, 'selection persists after hover change');
+        assert(interaction.outline.visible, 'outline persists after hover change');
+
+        console.log = originalLog;
+
+        // ------------------------------------------------------- teardown
+        interaction.dispose();
+        labels.dispose();
+        renderer.dispose();
+
+        out.push(`---`);
+        out.push(`shelves=${layout.stats.shelves} plan=${layout.stats.width.toFixed(1)}x${layout.stats.depth.toFixed(1)} occupancy=${(layout.stats.occupancy * 100).toFixed(1)}%`);
+        out.push(failures === 0 ? 'RESULT: ALL PASSED' : `RESULT: ${failures} FAILED`);
+      } catch (error) {
+        out.push(`FAIL uncaught exception :: ${error && error.stack ? error.stack : error}`);
+        failures++;
+      }
+
+      document.getElementById('results').textContent = out.join('\n');
+      document.title = failures === 0 ? 'CHECKS-PASSED' : 'CHECKS-FAILED';
+    </script>
+  </body>
+</html>

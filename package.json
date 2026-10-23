@@ -1,0 +1,29 @@
+{
+  "name": "interactive-mall-map",
+  "private": true,
+  "version": "1.3.0",
+  "type": "module",
+  "description": "Interactive 2D/3D shopping mall map prototype — Vanilla JS + Three.js (Technical Specification v1.3)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "verify": "node scripts/verify-layout.mjs",
+    "runtime-check": "node scripts/runtime-check.mjs",
+    "visual-check": "node scripts/visual-check.mjs",
+    "screenshot": "node scripts/screenshot.mjs",
+    "perf-check": "node scripts/perf-check.mjs",
+    "perf-labels": "node scripts/perf-labels.mjs",
+    "perf-experiment": "node scripts/perf-experiment.mjs"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.15.0",
+    "vite": "^8.3.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
