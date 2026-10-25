@@ -1,22 +1,19 @@
 /**
- * scripts/perf-labels.mjs — Measure the real cost of the 100 HTML labels and
- * compare strategies that avoid the browser's style/layout work.
+ * scripts/perf-labels.mjs — Measure the cost of the WebGL label pass and prove
+ * that nothing is redrawn while the scene is idle.
  *
  * Usage:  node scripts/perf-labels.mjs [url]
  *
- * Writing to the style of an element invalidates it, and the browser re-runs
- * style + layout lazily. That deferred work is invisible to
- * `performance.now()` around the update call, so this script forces a
- * synchronous layout (`document.body.offsetHeight`) right after the update in
- * order to measure the true cost.
+ * Labels are sprites with cached `CanvasTexture`; the CPU work per frame is just
+ * projecting anchors and moving quads. The interesting question is therefore how
+ * much the extra WebGL pass and the label textures cost while the camera moves,
+ * and whether the render-on-demand loop really stops drawing when nothing
+ * changes.
  *
- * Strategies compared:
- *   shipped (current)     — как в приложении: писать только при изменении,
- *                            масштаб с шагом 0.05, ширина — по числу символов
- *   scale only            — обновляем только transform, ширину не трогаем
- *   width only            — обновляем только ширину, transform не трогаем
- *   max-width every frame — старая схема: обе величины пишутся каждый кадр
- *   no updates            — обновление вообще не вызывается
+ * Measured:
+ *   labels on   — normal application
+ *   labels off  — same camera motion, `labels.setVisible(false)`
+ *   idle        — camera untouched, count renderer.render() calls for 1.5 s
  */
 
 import puppeteer from 'puppeteer-core';
@@ -27,8 +24,13 @@ const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
-  protocolTimeout: 180000,
-  args: ['--no-sandbox', '--disable-gpu', '--enable-unsafe-swiftshader', '--window-size=1600,1000']
+  protocolTimeout: 300000,
+  args: [
+    '--no-sandbox',
+    '--disable-gpu',
+    '--enable-unsafe-swiftshader',
+    '--window-size=1600,1000'
+  ]
 });
 
 try {
@@ -38,147 +40,131 @@ try {
   await page.waitForSelector('canvas.mall-canvas', { timeout: 30000 });
   await new Promise((r) => setTimeout(r, 2500));
 
-  /**
-   * Install an alternative `labels.update` implementation in the page.
-   */
-  async function patch(kind) {
-    await page.evaluate((strategy) => {
-      const labels = window.mallMap.labels;
+  await page.evaluate(() => {
+    const app = window.mallMap;
 
-      if (!labels.__originalUpdate) labels.__originalUpdate = labels.update.bind(labels);
-      if (strategy === 'shipped') {
-        labels.update = labels.__originalUpdate;
-        return;
-      }
-      if (strategy === 'none') {
-        labels.update = () => {};
-        return;
-      }
+    // Фиксируем разрешение: иначе динамический масштаб меняется между прогонами
+    // и сравнение «подписи вкл/выкл» перестаёт быть честным.
+    app.resolutionScaler.update = () => false;
+    app.renderer.setPixelRatio(1);
 
-      // Общие заготовки для всех вариантов.
-      const context = document.createElement('canvas').getContext('2d');
-      context.font = '600 12px "Inter", "Segoe UI", system-ui, sans-serif';
-      let charWidth = 0;
-      let charCount = 0;
-      for (const item of labels.items) {
-        charWidth += context.measureText(item.shop.name).width;
-        charCount += item.shop.name.length;
-        item.__chars = -1;
-        item.__scale = -1;
-      }
-      charWidth = charCount > 0 ? charWidth / charCount : 7;
+    window.__p = { labelMs: 0, renderMs: 0, renderCalls: 0 };
+    const labelRender = app.labels.render.bind(app.labels);
+    app.labels.render = (...args) => {
+      const t0 = performance.now();
+      const result = labelRender(...args);
+      window.__p.labelMs += performance.now() - t0;
+      return result;
+    };
+    const render = app.renderer.render.bind(app.renderer);
+    app.renderer.render = (...args) => {
+      const t0 = performance.now();
+      render(...args);
+      app.renderer.getContext().finish();
+      window.__p.renderMs += performance.now() - t0;
+      window.__p.renderCalls++;
+    };
+  });
 
-      const geometry = (camera, viewportHeight) => {
-        const isOrtho = camera.isOrthographicCamera;
-        const unitSpan = isOrtho
-          ? (camera.top - camera.bottom) / camera.zoom
-          : 2 * Math.tan((camera.fov * Math.PI) / 360);
-        const out = [];
-        for (const item of labels.items) {
-          const distance = camera.position.distanceTo(item.anchor);
-          const unitsPerPixel = ((isOrtho ? unitSpan : unitSpan * distance)) / viewportHeight;
-          const worldSize = (item.placement.width + item.placement.depth) / 2;
-          const footprintPx = worldSize / Math.max(unitsPerPixel, 1e-6);
-          const scale = Math.min(1.3, Math.max(0.75, footprintPx / 30));
-          out.push({ item, footprintPx, scale, width: (footprintPx * 1.2) / scale });
-        }
-        return out;
-      };
-
-      if (strategy === 'scale-only') {
-        labels.update = (camera, h) => {
-          for (const g of geometry(camera, h)) {
-            g.item.inner.style.setProperty('--label-scale', g.scale.toFixed(3));
-          }
-        };
-        return;
-      }
-
-      if (strategy === 'width-only') {
-        labels.update = (camera, h) => {
-          for (const g of geometry(camera, h)) {
-            g.item.inner.style.setProperty('--label-width', `${g.width.toFixed(1)}px`);
-          }
-        };
-        return;
-      }
-
-      if (strategy === 'every-frame') {
-        // Старая схема: обе величины перезаписываются каждый кадр.
-        labels.update = (camera, h) => {
-          for (const g of geometry(camera, h)) {
-            g.item.inner.style.setProperty('--label-scale', g.scale.toFixed(3));
-            g.item.inner.style.setProperty('--label-width', `${g.width.toFixed(1)}px`);
-          }
-        };
-        return;
-      }
-    }, kind);
-  }
-
-  async function measure(label) {
-    await new Promise((r) => setTimeout(r, 300));
-
-    const result = await page.evaluate(async () => {
-      const app = window.mallMap;
-      const camera = app.cameraManager.perspectiveCamera;
-      const controls = app.cameraManager.controls3D;
-
-      let updateMs = 0;
-      let layoutMs = 0;
-      let frames = 0;
-      const start = performance.now();
-
-      await new Promise((resolve) => {
-        function step() {
-          const angle = (performance.now() - start) / 1400;
-          camera.position.set(Math.sin(angle) * 90, 70, Math.cos(angle) * 90);
-          camera.lookAt(controls.target);
-          camera.updateMatrixWorld(true);
-          controls.update();
-
-          const t0 = performance.now();
-          app.labels.update(camera, window.innerHeight);
-          const t1 = performance.now();
-          // Принудительно завершаем отложенные пересчёты стилей и вёрстки.
-          void document.body.offsetHeight;
-          const t2 = performance.now();
-
-          updateMs += t1 - t0;
-          layoutMs += t2 - t1;
-          frames++;
-
-          if (performance.now() - start < 2000) requestAnimationFrame(step);
-          else resolve();
-        }
-        requestAnimationFrame(step);
+  async function measure(name, labelsVisible) {
+    // Готовим состояние и счётчики, затем крутим камеру настоящим
+    // перетаскиванием мышью: так OrbitControls сам сообщает об изменениях,
+    // и оба режима (подписи вкл/выкл) проходят через один и тот же путь.
+    await page.evaluate((visible) => {
+      window.mallMap.labels.setVisible(visible);
+      window.__p.labelMs = 0;
+      window.__p.renderMs = 0;
+      window.__p.renderCalls = 0;
+      window.__rafTimes = [];
+      window.__rafStop = false;
+      requestAnimationFrame(function tick(t) {
+        window.__rafTimes.push(t);
+        if (!window.__rafStop) requestAnimationFrame(tick);
       });
+    }, labelsVisible);
 
-      return { updateMs: updateMs / frames, layoutMs: layoutMs / frames };
+    await page.mouse.move(800, 500);
+    await page.mouse.down();
+    const start = Date.now();
+    let step = 0;
+    while (Date.now() - start < 3000) {
+      const angle = step / 14;
+      await page.mouse.move(800 + Math.cos(angle) * 220, 500 + Math.sin(angle) * 80);
+      step++;
+      await new Promise((r) => setTimeout(r, 16));
+    }
+    await page.mouse.up();
+
+    const result = await page.evaluate(() => {
+      window.__rafStop = true;
+      const ts = window.__rafTimes;
+      const intervals = [];
+      for (let i = 1; i < ts.length; i++) intervals.push(ts[i] - ts[i - 1]);
+      intervals.sort((a, b) => a - b);
+      const n = Math.max(intervals.length, 1);
+      const elapsed = ts.length > 1 ? ts[ts.length - 1] - ts[0] : 0;
+      return {
+        fps: elapsed > 0 ? (1000 * (ts.length - 1)) / elapsed : 0,
+        msPerFrame: elapsed / n,
+        p95: intervals[Math.floor(n * 0.95)] ?? 0,
+        labelMs: window.__p.labelMs / n,
+        renderMs: window.__p.renderMs / n,
+        renderCalls: window.__p.renderCalls,
+        frames: n
+      };
     });
 
     console.log(
-      `  ${label.padEnd(32)} update: ${result.updateMs.toFixed(2)} ms   ` +
-        `style+layout: ${result.layoutMs.toFixed(2)} ms   total: ${(result.updateMs + result.layoutMs).toFixed(2)} ms`
+      `  ${name.padEnd(12)} FPS: ${result.fps.toFixed(1).padStart(5)}   ` +
+        `ms/frame: ${result.msPerFrame.toFixed(1).padStart(6)}   ` +
+        `p95: ${result.p95.toFixed(1).padStart(6)}   ` +
+        `labels CPU: ${result.labelMs.toFixed(2)}   ` +
+        `render: ${result.renderMs.toFixed(2)} ms`
     );
+    return result;
   }
 
-  console.log('\n=== Cost of the 100 HTML labels (per frame, while orbiting) ===');
+  console.log('\n=== Labels while the camera orbits (1600 x 1000, software renderer) ===');
+  const on = await measure('labels on', true);
+  const off = await measure('labels off', false);
+  const onAgain = await measure('labels on', true);
 
-  await patch('shipped');
-  await measure('shipped (current app)');
+  const onMs = (on.msPerFrame + onAgain.msPerFrame) / 2;
+  const onRender = (on.renderMs + onAgain.renderMs) / 2;
+  console.log(
+    `\n  orbit average (two runs): labels on ${onMs.toFixed(1)} ms/frame, ` +
+      `labels off ${off.msPerFrame.toFixed(1)} ms/frame → ` +
+      `${(((onMs - off.msPerFrame) / Math.max(off.msPerFrame, 1)) * 100).toFixed(0)}% overhead`
+  );
+  console.log(
+    `  renderer.render cost: ${onRender.toFixed(2)} ms/frame with labels, ` +
+      `${off.renderMs.toFixed(2)} ms/frame without`
+  );
 
-  await patch('scale-only');
-  await measure('scale only (no width)');
+  const idle = await page.evaluate(async () => {
+    const app = window.mallMap;
+    app.labels.setVisible(true);
 
-  await patch('width-only');
-  await measure('width only (no scale)');
+    // После перетаскивания OrbitControls ещё некоторое время гасит инерцию —
+    // ждём, пока камера окончательно успокоится, и только потом считаем.
+    let last = window.__p.renderCalls;
+    const settleStart = performance.now();
+    while (performance.now() - settleStart < 5000) {
+      await new Promise((r) => setTimeout(r, 200));
+      if (window.__p.renderCalls === last) break;
+      last = window.__p.renderCalls;
+    }
 
-  await patch('every-frame');
-  await measure('max-width every frame (old)');
+    window.__p.renderCalls = 0;
+    const start = performance.now();
+    await new Promise((r) => setTimeout(r, 1500));
+    return { calls: window.__p.renderCalls, ms: performance.now() - start };
+  });
 
-  await patch('none');
-  await measure('no label updates');
+  console.log(
+    `\n=== Idle ===\n  renderer.render calls in ${(idle.ms / 1000).toFixed(1)} s: ${idle.calls}` +
+      (idle.calls === 0 ? '  (no repaints — no flicker)' : '')
+  );
 } finally {
   await browser.close();
 }

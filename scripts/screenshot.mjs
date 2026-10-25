@@ -56,8 +56,7 @@ await page.screenshot({ path: join(outDir, '02-2d-plan.png') });
 const hoverTarget = await page.evaluate(() => {
   const app = window.mallMap;
   if (!app) return null;
-  const meshes = app.state.placements;
-  const list = [...meshes.values()];
+  const list = [...app.placements.values()];
   const pick = list[Math.floor(list.length / 2)];
   const mesh = app.interaction.meshById.get(pick.id);
   const v = mesh.getWorldPosition(new app.THREE.Vector3()).project(app.cameraManager.activeCamera);
@@ -92,14 +91,15 @@ const diagnostics = await page.evaluate(() => {
   const app = window.mallMap;
   if (!app) return { error: 'window.mallMap missing' };
   const cam = app.cameraManager;
-  const labels = [...document.querySelectorAll('.shop-label')];
+  const labels = app.labels.items;
   return {
     mode: cam.mode,
     blend: cam.blend,
     activeCamera: cam.activeCamera?.type,
-    meshCount: app.state.placements.size,
-    labelElements: labels.length,
-    labelScales: labels.slice(0, 6).map((el) => getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale')),
+    meshCount: app.placements.size,
+    labelSprites: labels.length,
+    visibleLabels: labels.filter((item) => item.sprite.visible).length,
+    labelScales: labels.slice(0, 6).map((item) => Number(item.scale.toFixed(2))),
     selectedId: app.interaction.selectedId,
     hoveredId: app.interaction.hoveredId,
     fps: document.getElementById('stat-fps')?.textContent,

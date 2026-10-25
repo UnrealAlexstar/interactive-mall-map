@@ -1,7 +1,8 @@
 /* ============================================================================
    style.css — UI shell for the interactive mall map.
-   Pure CSS, no framework: the toolbar, the information panels, the status bar
-   and the CSS2D label styling.
+   Pure CSS, no framework: the toolbar, the information panels and the status bar.
+   Labels are drawn inside the WebGL canvas (see src/labels.js), so they need no
+   CSS of their own.
    ========================================================================== */
 
 :root {
@@ -59,81 +60,6 @@ body {
   height: 100%;
   outline: none;
   touch-action: none;
-}
-
-/* --------------------------------------------------------------- labels -- */
-
-/* The CSS2D layer sits above the canvas but never steals pointer events;
-   individual labels opt back in with `pointer-events: auto`. */
-.label-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-  z-index: 2;
-  /* Оптимизация: слой переводится на композитор */
-  will-change: transform;
-}
-
-.shop-label {
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.shop-label__inner {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  padding: 2px 6px 3px;
-  border-radius: 6px;
-  background: rgba(9, 12, 18, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.5);
-  white-space: nowrap;
-  max-width: var(--label-width, 200px);
-  /* Масштаб задаёт labels.js. transform не вызывает пересчёт вёрстки. */
-  transform: translateZ(0) scale(var(--label-scale, 1));
-  transform-origin: 50% 100%;
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
-  /* Минимум переходов - только цвет фона/бордера */
-  transition: background 100ms ease, border-color 100ms ease;
-  /* Подсказка браузеру использовать композитор */
-  will-change: transform;
-}
-
-.shop-label:hover .shop-label__inner {
-  background: rgba(24, 32, 45, 0.92);
-  border-color: rgba(255, 255, 255, 0.34);
-}
-
-.shop-label__name {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: #f4f6f8;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.shop-label__meta {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  display: none;
-}
-
-.shop-label.is-detailed .shop-label__meta {
-  display: block;
-}
-
-.shop-label.is-hidden {
-  display: none !important;
 }
 
 /* -------------------------------------------------------------- toolbar -- */

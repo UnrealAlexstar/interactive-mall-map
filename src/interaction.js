@@ -40,16 +40,23 @@ export class InteractionManager {
    * @param {THREE.Scene} options.scene
    * @param {(shop:object|null)=>void} [options.onHover]
    * @param {(shop:object|null)=>void} [options.onSelect]
+   * @param {(clientX:number, clientY:number)=>string|null} [options.hitTestLabel]
+   *   необязательный тест попадания по слою подписей. Подписи — это спрайты
+   *   в WebGL, а не DOM-элементы, поэтому клик/наведение по ним определяется
+   *   до рейкаста по мешам.
    */
-  constructor({ domElement, cameraManager, meshes, scene, onHover, onSelect }) {
+  constructor({ domElement, cameraManager, meshes, scene, onHover, onSelect, hitTestLabel }) {
     this.domElement = domElement;
     this.cameraManager = cameraManager;
     this.meshes = meshes;
     this.onHover = onHover;
     this.onSelect = onSelect;
+    this.hitTestLabel = hitTestLabel ?? null;
 
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2(-2, -2); // (-2, -2) = курсор вне окна
+    this.clientX = -1;
+    this.clientY = -1;
     this.pointerInside = false;
     this.needsRaycast = false;
     this.hoveredId = null;
@@ -106,6 +113,8 @@ export class InteractionManager {
   _updatePointer(event) {
     const rect = this.domElement.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
+    this.clientX = event.clientX;
+    this.clientY = event.clientY;
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.pointerInside = true;
@@ -132,6 +141,11 @@ export class InteractionManager {
    */
   _onPointerDown(event) {
     this._updatePointer(event);
+    const labelId = this.hitTestLabel ? this.hitTestLabel(this.clientX, this.clientY) : null;
+    if (labelId) {
+      this.select(labelId);
+      return;
+    }
     const hit = this.raycast();
     if (hit) this.select(hit.object.userData.shopId);
   }
@@ -151,25 +165,39 @@ export class InteractionManager {
   /**
    * Обновление состояния наведения — один раз за кадр, и только если мышь
    * действительно двигалась.
+   *
+   * Сначала проверяется попадание по подписи (WebGL-спрайты), затем — рейкаст
+   * по коробкам. Благодаря этому клик по тексту выбирает тот же магазин, что и
+   * клик по его мешу.
+   *
+   * @returns {boolean} true, если состояние наведения изменилось
    */
   update() {
-    if (!this.needsRaycast || !this.pointerInside) return;
+    if (!this.needsRaycast || !this.pointerInside) return false;
     this.needsRaycast = false;
+
+    const labelId = this.hitTestLabel ? this.hitTestLabel(this.clientX, this.clientY) : null;
+    if (labelId) {
+      const changed = labelId !== this.hoveredId;
+      this.setHover(labelId);
+      return changed;
+    }
 
     const hit = this.raycast();
     const nextId = hit ? hit.object.userData.shopId : null;
 
-    if (nextId === this.hoveredId) return;
+    if (nextId === this.hoveredId) return false;
     this.setHover(nextId);
+    return true;
   }
 
   /**
    * Публичный способ задать наведённый магазин.
    *
    * Его же использует слой подписей: в 2D-режиме подпись лежит прямо на
-   * магазине, поэтому курсор оказывается над подписью (это соседний с
-   * canvas элемент), а не над коробкой. Через один и тот же метод подсветка и
-   * панель справа остаются согласованными при любом положении курсора.
+   * магазине, поэтому курсор оказывается над подписью, а не над коробкой.
+   * Через один и тот же метод подсветка и панель справа остаются
+   * согласованными при любом положении курсора.
    *
    * @param {string|null} id
    */

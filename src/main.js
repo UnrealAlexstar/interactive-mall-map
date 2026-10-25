@@ -6,7 +6,7 @@
  *   data.js        ->  100 описаний магазинов (id / имя / размеры / цвет)
  *   layout.js      ->  координаты (x, z) для каждого магазина без наложений
  *   scene.js       ->  рендерер, пол, свет, по коробке на магазин
- *   labels.js      ->  по одной HTML-подписи на магазин
+ *   labels.js      ->  подписи-спрайты в отдельном проходе поверх сцены
  *   camera.js      ->  камера 3D, камера 2D и анимация перехода между ними
  *   interaction.js ->  наведение мышью и выделение по клику
  *
@@ -14,7 +14,7 @@
  *   1. продвигаем анимацию камеры;
  *   2. обновляем наведение мыши;
  *   3. обновляем подписи (только если камера двигалась);
- *   4. рисуем сцену и слой подписей;
+ *   4. рисуем кадр — только когда что-то реально изменилось;
  *   5. при необходимости уменьшаем разрешение, чтобы удержать плавный FPS.
  */
 
@@ -79,13 +79,14 @@ class ResolutionScaler {
   /**
    * Вызывать один раз за кадр.
    * @param {number} dt сколько миллисекунд прошло с прошлого кадра
+   * @returns {boolean} true, если разрешение изменилось и кадр надо перерисовать
    */
   update(dt) {
     this.elapsed += dt;
     this.frames++;
 
     // Решение принимаем раз в секунду, иначе разрешение «дёргалось» бы.
-    if (this.elapsed < 1000) return;
+    if (this.elapsed < 1000) return false;
 
     const fps = (this.frames * 1000) / this.elapsed;
     this.elapsed = 0;
@@ -98,11 +99,12 @@ class ResolutionScaler {
       next = Math.min(this.max, this.ratio + 0.25); // есть запас — рисуем чётче
     }
 
-    if (next !== this.ratio) {
-      this.ratio = next;
-      this.renderer.setPixelRatio(next);
-      console.info(`[MALL MAP] Render scale adjusted to ${next.toFixed(2)}x (${fps.toFixed(0)} fps)`);
-    }
+    if (next === this.ratio) return false;
+
+    this.ratio = next;
+    this.renderer.setPixelRatio(next);
+    console.info(`[MALL MAP] Render scale adjusted to ${next.toFixed(2)}x (${fps.toFixed(0)} fps)`);
+    return true;
   }
 }
 
@@ -145,19 +147,34 @@ function init() {
 
   // ------------------------------------------------------------- камера
   // Органы управления слушают события на КОНТЕЙНЕРЕ, а не на самом canvas:
-  // слой подписей — сосед canvas, и колесо мыши над подписью до canvas не
-  // дойдёт, то есть зум перестанет работать. Слушая общий родитель, мы
-  // сохраняем работоспособность зума.
+  // контейнер занимает всё окно и остаётся стабильной целью, даже если canvas
+  // пересоздадут или поверх него появятся другие элементы.
   const cameraManager = new CameraManager({
     domElement: container,
     bounds: layout.bounds,
     aspect: viewportWidth / viewportHeight
   });
 
+  // -------------------------------------------------------------- подписи
+  // Подписи создаются раньше InteractionManager: он использует `labels.pick()`
+  // для наведения/клика по тексту, поэтому менеджер подписей уже должен быть
+  // готов. Сами подписи от мыши не зависят — только от камеры и размера окна.
+  const labels = new LabelManager({
+    container,
+    shops,
+    placements,
+    height: SHOP_HEIGHT
+  });
+  labels.setSize(viewportWidth, viewportHeight);
+
   // --------------------------------------------------------- взаимодействие
   // Текущее состояние: наведённый и выбранный магазин.
   let hovered = null;
   let selected = null;
+  // Флаг «на экране есть изменения, которые видит только WebGL»: выбор,
+  // подсветка, изменение разрешения, resize. Нужен, чтобы не рисовать кадры
+  // вхолостую, но и не пропустить изменения материалов/рамок.
+  let needsRender = true;
 
   const interaction = new InteractionManager({
     domElement: renderer.domElement,
@@ -166,32 +183,19 @@ function init() {
     scene,
     onHover: (shop) => {
       hovered = shop;
+      // Подсветка подписи должна совпадать с подсветкой коробки.
+      labels.setHover(shop ? shop.id : null);
+      needsRender = true;
       updateInfoPanel();
     },
     onSelect: (shop) => {
       selected = shop;
+      needsRender = true;
       updateInfoPanel();
-    }
-  });
-
-  // -------------------------------------------------------------- подписи
-  const labels = new LabelManager({
-    container,
-    shops,
-    placements,
-    height: SHOP_HEIGHT,
-    onHover: (id) => {
-      // Подписи лежат поверх canvas, поэтому их события идут в тот же
-      // InteractionManager — подсветка коробки и панель остаются в синхроне.
-      interaction.setHover(id);
     },
-    onSelect: (id) => {
-      // Клик по подписи выбирает тот же магазин, что и клик по коробке.
-      interaction.select(id);
-    }
+    // Клик/наведение по тексту обрабатываются до рейкаста по коробкам.
+    hitTestLabel: (clientX, clientY) => labels.pick(clientX, clientY)
   });
-  labels.attachTo(scene);
-  labels.setSize(viewportWidth, viewportHeight);
 
   // ----------------------------------------------------------------- UI
   dom.modeToggle.addEventListener('click', () => cameraManager.toggleMode());
@@ -200,12 +204,15 @@ function init() {
     cameraManager.resetView();
     interaction.clearSelection();
     selected = null;
+    needsRender = true;
     updateInfoPanel();
   });
 
   dom.toggleLabels.addEventListener('click', () => {
     const visible = !labels.visible;
     labels.setVisible(visible);
+    // Скрыть подписи можно только перерисовав кадр без них.
+    needsRender = true;
     dom.toggleLabels.classList.toggle('is-active', visible);
     dom.toggleLabels.setAttribute('aria-pressed', String(visible));
   });
@@ -243,6 +250,7 @@ function init() {
     renderer.setSize(viewportWidth, viewportHeight);
     cameraManager.resize(viewportWidth / viewportHeight);
     labels.setSize(viewportWidth, viewportHeight);
+    needsRender = true;
   }
 
   // ------------------------------------------------------------- показатели
@@ -297,6 +305,7 @@ function init() {
 
   // ------------------------------------------------------------- цикл кадра
   let lastMode = null;
+  let lastTransitioning = false;
   let frames = 0;
   let fpsStamp = performance.now();
   let lastFrameStamp = fpsStamp;
@@ -310,9 +319,12 @@ function init() {
   function updateModeUi() {
     const mode = cameraManager.mode;
     const transitioning = cameraManager.isTransitioning;
-    if (mode === lastMode && !transitioning) return;
+    // Отслеживаем и режим, и факт анимации: иначе после завершения перехода
+    // бейдж навсегда оставался бы с надписью «TRANSITION».
+    if (mode === lastMode && transitioning === lastTransitioning) return;
 
     lastMode = mode;
+    lastTransitioning = transitioning;
     const badgeText = transitioning ? 'TRANSITION' : mode === '2d' ? '2D PLAN' : '3D VIEW';
     if (dom.modeBadge.textContent !== badgeText) {
       dom.modeBadge.textContent = badgeText;
@@ -332,23 +344,32 @@ function init() {
     const delta = now - lastFrameStamp;
     lastFrameStamp = now;
 
-    // 1. Камера (в т.ч. анимация перехода 2D ⇄ 3D).
-    cameraManager.update(now);
+    // 1. Камера (в т.ч. анимация перехода 2D ⇄ 3D). Возвращает true только
+    //    при реальном изменении — субпиксельное дрожание OrbitControls
+    //    откатывается внутри CameraManager.
+    const cameraChanged = cameraManager.update(now);
 
     // 2. Наведение мышью — пересчёт не чаще раза за кадр.
-    interaction.update();
+    const hoverChanged = interaction.update();
 
-    // 3. Подписи — только если камера двигалась (см. labels.js).
+    // 3. Подписи — сами проверяют, двигалась ли камера (см. labels.js).
     labels.setBlend(cameraManager.blend);
-    labels.update(cameraManager.activeCamera, viewportHeight);
+    const labelsChanged = labels.update(cameraManager.activeCamera, viewportHeight);
 
-    // 4. Рисуем.
-    const camera = cameraManager.activeCamera;
-    renderer.render(scene, camera);
-    labels.render(scene, camera);
+    // 4. Рисуем только когда на экране действительно что-то изменилось.
+    //    На неподвижной сцене не тратятся ни CPU, ни GPU, а картинка не
+    //    мерцает от бесконечной перерисовки.
+    if (cameraChanged || hoverChanged || labelsChanged || needsRender) {
+      const camera = cameraManager.activeCamera;
+      renderer.render(scene, camera);
+      // Подписи рисуются вторым проходом в тот же WebGL-буфер: основной
+      // render() очищает цвет, поэтому слой нужно рисовать в каждом кадре.
+      labels.render(renderer);
+      needsRender = false;
+    }
 
     // 5. Если кадры идут медленно — уменьшаем разрешение (см. ResolutionScaler).
-    resolutionScaler.update(delta);
+    if (resolutionScaler.update(delta)) needsRender = true;
 
     updateModeUi();
 

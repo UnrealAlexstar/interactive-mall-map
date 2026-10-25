@@ -116,17 +116,21 @@ assert(shadowState.needsUpdate === false, 'the shadow map was built once and is 
 
 // ---------------------------------------------------------------- labels
 const labelStats = await page.evaluate(() => {
-  const els = [...document.querySelectorAll('.shop-label')];
-  const rects = els.map((el) => el.getBoundingClientRect());
-  const onScreen = rects.filter((r) => r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight);
-  const fontSizes = els.map((el) => parseFloat(getComputedStyle(el.firstElementChild).fontSize));
-  const scales = els.map((el) => parseFloat(getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale')));
-  // The effective on-screen text size = base font size (13px) x responsive scale.
-  const effectiveFonts = els.map((el) => {
-    const name = el.querySelector('.shop-label__name');
-    const scale = parseFloat(getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale'));
-    return parseFloat(getComputedStyle(name).fontSize) * scale;
-  });
+  const labels = window.mallMap.labels;
+  const rects = labels.items
+    .filter((item) => item.sprite.visible)
+    .map((item) => {
+      const w = item.boxWidth * item.scale;
+      const h = item.boxHeight * item.scale;
+      const left = item.screenX - w / 2;
+      const top = item.screenY - h * labels.centerY;
+      return { left, right: left + w, top, bottom: top + h, text: item.text, scale: item.scale };
+    });
+  const onScreen = rects.filter(
+    (r) => r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight
+  );
+  // The label layout uses a 12px name font; the sprite scale makes it responsive.
+  const effectiveFonts = rects.map((r) => 12 * r.scale);
   // Count how many labels overlap each other significantly.
   let overlaps = 0;
   for (let i = 0; i < rects.length; i++) {
@@ -139,18 +143,20 @@ const labelStats = await page.evaluate(() => {
     }
   }
   return {
-    total: els.length,
+    total: labels.items.length,
+    drawn: rects.length,
     onScreen: onScreen.length,
     minFont: Math.min(...effectiveFonts),
     maxFont: Math.max(...effectiveFonts),
-    minScale: Math.min(...scales),
-    maxScale: Math.max(...scales),
-    truncated: els.filter((el) => el.querySelector('.shop-label__name').textContent.endsWith('…')).length,
+    minScale: Math.min(...rects.map((r) => r.scale)),
+    maxScale: Math.max(...rects.map((r) => r.scale)),
+    truncated: rects.filter((r) => r.text.endsWith('…')).length,
     overlaps
   };
 });
 console.log('   labels:', JSON.stringify(labelStats));
-assert(labelStats.total === 100, '100 labels rendered', `${labelStats.total}`);
+assert(labelStats.total === 100, '100 labels created', `${labelStats.total}`);
+assert(labelStats.drawn === 100, 'all labels are rendered on screen', `${labelStats.drawn}`);
 assert(labelStats.onScreen >= 90, 'the labels are visible in the viewport', `${labelStats.onScreen} on screen`);
 assert(labelStats.minFont >= 8, 'the smallest label stays legible (>= 8px)', `${labelStats.minFont.toFixed(1)}px`);
 assert(labelStats.maxScale <= 1.4, 'the label scale is clamped', `${labelStats.maxScale}`);
@@ -186,8 +192,15 @@ console.log('   frame:', JSON.stringify(stats2d));
 assert(stats2d.distinctColors > 200, 'the 2D frame is fully rendered', `${stats2d.distinctColors} colours`);
 
 const labels2d = await page.evaluate(() => {
-  const els = [...document.querySelectorAll('.shop-label')];
-  const rects = els.map((el) => el.getBoundingClientRect());
+  const labels = window.mallMap.labels;
+  const items = labels.items.filter((item) => item.sprite.visible);
+  const rects = items.map((item) => {
+    const w = item.boxWidth * item.scale;
+    const h = item.boxHeight * item.scale;
+    const left = item.screenX - w / 2;
+    const top = item.screenY - h * labels.centerY;
+    return { left, right: left + w, top, bottom: top + h, text: item.text, scale: item.scale };
+  });
   let overlaps = 0;
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
@@ -198,16 +211,11 @@ const labels2d = await page.evaluate(() => {
       if (ox > 6 && oy > 6) overlaps++;
     }
   }
-  const effective = els.map((el) => {
-    const name = el.querySelector('.shop-label__name');
-    const scale = parseFloat(getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale'));
-    return parseFloat(getComputedStyle(name).fontSize) * scale;
-  });
   return {
-    total: els.length,
+    total: items.length,
     overlaps,
-    minFont: Math.min(...effective),
-    truncated: els.filter((el) => el.querySelector('.shop-label__name').scrollWidth > el.querySelector('.shop-label__name').clientWidth + 1).length
+    minFont: Math.min(...rects.map((r) => 12 * r.scale)),
+    truncated: rects.filter((r) => r.text.endsWith('…')).length
   };
 });
 console.log('   labels:', JSON.stringify(labels2d));
@@ -256,16 +264,25 @@ assert(!!selected.panel && selected.panel !== 'No selection', 'the info panel is
 const labelClick = await page.evaluate(() => {
   const app = window.mallMap;
   app.interaction.clearSelection();
-  const el = [...document.querySelectorAll('.shop-label')].find((e) => {
-    const r = e.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && r.left > 40 && r.top > 120;
+  const labels = app.labels;
+  const item = labels.items.find((entry) => {
+    if (!entry.sprite.visible) return false;
+    const w = entry.boxWidth * entry.scale;
+    const h = entry.boxHeight * entry.scale;
+    const left = entry.screenX - w / 2;
+    const top = entry.screenY - h * labels.centerY;
+    return w > 0 && h > 0 && left > 40 && top > 120;
   });
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  return { id: el.dataset.shopId, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  if (!item) return null;
+  const w = item.boxWidth * item.scale;
+  const h = item.boxHeight * item.scale;
+  const x = item.screenX;
+  const y = item.screenY - h * labels.centerY + h / 2;
+  // pick() resolves the top-most label at that point; clicking must select it.
+  return { id: labels.pick(x, y), x, y };
 });
 
-if (labelClick) {
+if (labelClick && labelClick.id) {
   await page.mouse.click(labelClick.x, labelClick.y);
   await new Promise((r) => setTimeout(r, 300));
   const afterLabel = await page.evaluate(() => window.mallMap.interaction.selectedId);
@@ -297,16 +314,16 @@ for (let i = 0; i < 10; i++) {
 await new Promise((r) => setTimeout(r, 800));
 
 const zoomed = await page.evaluate(() => {
-  const els = [...document.querySelectorAll('.shop-label')];
-  const scales = els.map((el) => parseFloat(getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale')));
+  const labels = window.mallMap.labels;
+  const items = labels.items.filter((item) => item.sprite.visible);
   // The name is truncated in JavaScript (labels.js), so the ellipsis is part of
   // the text itself.
-  const truncated = els.filter((el) => el.querySelector('.shop-label__name').textContent.endsWith('…')).length;
-  const widths = els.map((el) => el.getBoundingClientRect().width);
+  const truncated = items.filter((item) => item.text.endsWith('…')).length;
+  const widths = items.map((item) => item.boxWidth * item.scale);
   return {
-    maxScale: Math.max(...scales),
+    maxScale: Math.max(...items.map((item) => item.scale)),
     truncated,
-    avgWidth: widths.reduce((a, b) => a + b, 0) / widths.length
+    avgWidth: widths.reduce((a, b) => a + b, 0) / Math.max(widths.length, 1)
   };
 });
 console.log('   zoomed:', JSON.stringify(zoomed));

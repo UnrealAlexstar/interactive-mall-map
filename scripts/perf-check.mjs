@@ -56,8 +56,9 @@ try {
     const originalUpdate = app.labels.update.bind(app.labels);
     app.labels.update = (...args) => {
       const t0 = performance.now();
-      originalUpdate(...args);
+      const changed = originalUpdate(...args);
       window.__perf.labelMs += performance.now() - t0;
+      return changed;
     };
 
     const originalRender = app.renderer.render.bind(app.renderer);
@@ -69,9 +70,13 @@ try {
       // below contains the actual GPU cost (shadow pass + colour pass).
       app.renderer.getContext().finish();
       window.__perf.renderMs += performance.now() - t0;
-      const info = app.renderer.info.render;
-      window.__perf.calls = info.calls;
-      window.__perf.triangles = info.triangles;
+      // Подписи рисуются вторым проходом и сбрасывают info.render, поэтому
+      // статистику снимаем именно после основного прохода сцены.
+      if (args[0] === app.scene) {
+        const info = app.renderer.info.render;
+        window.__perf.calls = info.calls;
+        window.__perf.triangles = info.triangles;
+      }
     };
   });
 

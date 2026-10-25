@@ -107,31 +107,65 @@
           container,
           shops,
           placements: map,
-          height: SHOP_HEIGHT,
-          onHover: () => {},
-          onSelect: () => {}
+          height: SHOP_HEIGHT
         });
-        labels.attachTo(scene);
         labels.setSize(container.clientWidth, container.clientHeight);
         labels.setBlend(0);
         labels.update(cameraManager.activeCamera, container.clientHeight);
         renderer.render(scene, cameraManager.activeCamera);
-        labels.render(scene, cameraManager.activeCamera);
-        const labelEls = document.querySelectorAll('.shop-label');
-        assert(labelEls.length === 100, '100 label elements created', `(${labelEls.length})`);
+        labels.render(renderer);
+
+        assert(labels.items.length === 100, '100 label sprites created', `(${labels.items.length})`);
         assert(
-          [...labelEls].every((el) => el.textContent.trim().length > 0),
-          'every label carries text'
+          labels.items.every((item) => item.shop && item.sprite.isSprite),
+          'every label is a sprite bound to its shop'
+        );
+        const visibleLabels = labels.items.filter((item) => item.sprite.visible);
+        assert(visibleLabels.length > 0, 'labels are visible in the viewport', `${visibleLabels.length}`);
+        assert(
+          visibleLabels.every((item) => item.text.trim().length > 0 && item.texture.image.width > 0),
+          'every visible label has text and a rasterised texture'
         );
         assert(
-          [...labelEls].every((el) => el.style.transform.includes('translate')),
-          'labels are positioned by CSS2DRenderer'
+          visibleLabels.every((item) => item.scale >= 0.7 && item.scale <= 1.31),
+          'responsive scale is clamped for every label'
         );
-        const scaled = [...labelEls].every((el) => {
-          const v = getComputedStyle(el.firstElementChild).getPropertyValue('--label-scale');
-          return v !== '' && Number(v) >= 0.5;
-        });
-        assert(scaled, 'responsive scale applied to every label');
+        assert(
+          labels.update(cameraManager.activeCamera, container.clientHeight) === false,
+          'labels skip all work while the camera is idle'
+        );
+
+        // Изменение размера canvas должно пересоздать GPU-текстуру. Иначе
+        // three.js загружает увеличенный кадр через texSubImage2D в старое
+        // хранилище, и WebGL сообщает GL_INVALID_VALUE.
+        while (gl.getError() !== gl.NO_ERROR) {
+          // очищаем ошибки, накопленные предыдущими проверками
+        }
+        const resizeTarget = visibleLabels[0];
+        resizeTarget.text = `${resizeTarget.text}.`;
+        resizeTarget.boxWidth += 16;
+        labels.update(cameraManager.activeCamera, container.clientHeight);
+        renderer.render(scene, cameraManager.activeCamera);
+        labels.render(renderer);
+        const glError = gl.getError();
+        assert(
+          glError === gl.NO_ERROR,
+          'label texture resize reallocates GPU storage',
+          `gl.getError()=0x${glError.toString(16)}`
+        );
+
+        // The last visible sprite is drawn on top, so pick() must return it at
+        // its own centre even if other labels overlap that point.
+        const pickTarget = visibleLabels[visibleLabels.length - 1];
+        const pickX = pickTarget.screenX;
+        const pickY = pickTarget.screenY - pickTarget.boxHeight * pickTarget.scale * labels.centerY +
+          (pickTarget.boxHeight * pickTarget.scale) / 2;
+        const rect = container.getBoundingClientRect();
+        assert(
+          labels.pick(rect.left + pickX, rect.top + pickY) === pickTarget.shop.id,
+          'pick() resolves the label under the pointer',
+          `${labels.pick(rect.left + pickX, rect.top + pickY)} vs ${pickTarget.shop.id}`
+        );
 
         // -------------------------------------------------- interaction
         const logged = [];

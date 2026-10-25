@@ -91,6 +91,13 @@ export class CameraManager {
     this.activeCamera = null;
     this.userInteracted = false; // пользователь уже трогал камеру?
 
+    // Снимок камеры до вызова OrbitControls.update(). Нужен, чтобы откатить
+    // субпиксельное дрожание, когда контролы уже «успокоились»: update()
+    // возвращает false, но перед этим успевает пересчитать position/quaternion.
+    this._savedPosition = new THREE.Vector3();
+    this._savedQuaternion = new THREE.Quaternion();
+    this._savedTarget = new THREE.Vector3();
+
     // --- камеры ---------------------------------------------------------
     this.perspectiveCamera = new THREE.PerspectiveCamera(FOV_3D, aspect, 0.5, 4000);
     this.perspectiveCamera.up.set(0, 1, 0);
@@ -373,7 +380,12 @@ export class CameraManager {
 
   /**
    * Продвинуть анимацию. Вызывается один раз за кадр.
+   *
    * @param {number} now метка времени в миллисекундах
+   * @returns {boolean} true, если камера действительно изменилась
+   *   (идёт переход, работает инерция OrbitControls или пользователь тянет мышь).
+   *   По этому флагу `main.js` решает, нужно ли вообще перерисовывать кадр:
+   *   на неподвижной сцене не тратятся ни CPU, ни GPU, а картинка не мерцает.
    */
   update(now) {
     const transition = this.transition;
@@ -403,18 +415,39 @@ export class CameraManager {
         this.transition = null;
         this.activate(transition.toMode, transition.to);
       }
-      return;
+      return true;
     }
 
     // Обычный кадр: камера едет по своим правилам.
     this.blend = this.mode === '2d' ? 1 : 0;
-    if (this.mode === '2d') {
-      this.controls2D.update();
-      this.activeCamera = this.orthographicCamera;
-    } else {
-      this.controls3D.update();
-      this.activeCamera = this.perspectiveCamera;
+
+    const controls = this.mode === '2d' ? this.controls2D : this.controls3D;
+    const camera = this.mode === '2d' ? this.orthographicCamera : this.perspectiveCamera;
+    this.activeCamera = camera;
+
+    // OrbitControls.update() пересчитывает позицию и lookAt КАЖДЫЙ вызов,
+    // даже когда пользователь ничего не делает. Из-за ошибок округления это
+    // даёт микроскопическое дрожание камеры — на неподвижной сцене оно
+    // выглядит как мерцание/«шевеление» пикселей. Поэтому запоминаем позу и
+    // откатываем её, если контролы сообщили, что реальных изменений нет.
+    this._savedPosition.copy(camera.position);
+    this._savedQuaternion.copy(camera.quaternion);
+    this._savedTarget.copy(controls.target);
+
+    const changed = controls.update();
+
+    if (!changed) {
+      camera.position.copy(this._savedPosition);
+      camera.quaternion.copy(this._savedQuaternion);
+      controls.target.copy(this._savedTarget);
+      return false;
     }
+
+    // OrbitControls меняет position/quaternion, но не world-матрицу. Подписи
+    // проецируются в этом же кадре, до вызова renderer.render(), поэтому
+    // матрицу нужно обновить здесь, иначе подписи отставали бы на кадр.
+    camera.updateMatrixWorld(true);
+    return true;
   }
 
   /** @returns {boolean} идёт ли сейчас анимация перехода */
